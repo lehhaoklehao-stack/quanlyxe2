@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Quản Lý Xe - Có Báo Động</title>
+    <script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-app.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-database.js"></script>
+
+    <style>
+        :root { --primary: #4361ee; --success: #2ec4b6; --danger: #ef233c; --bg: #f8f9fa; }
+        body { font-family: -apple-system, sans-serif; background: var(--bg); margin: 0; padding: 15px; }
+        .card { background: white; border-radius: 20px; padding: 20px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); margin-bottom: 20px; }
+        h3 { margin-top: 0; color: var(--primary); text-align: center; font-size: 18px; text-transform: uppercase; }
+        
+        input, select { width: 100%; padding: 15px; margin-bottom: 12px; border: 1px solid #ddd; border-radius: 12px; box-sizing: border-box; font-size: 16px; outline: none; }
+        
+        .btn-start { width: 100%; background: var(--primary); color: white; border: none; padding: 16px; border-radius: 12px; font-weight: bold; font-size: 16px; cursor: pointer; }
+        
+        .car-card { background: white; border-radius: 18px; padding: 18px; margin-bottom: 12px; border-left: 8px solid var(--primary); box-shadow: 0 2px 8px rgba(0,0,0,0.05); transition: 0.3s; }
+        
+        /* Hiệu ứng nháy đỏ khi hết giờ */
+        .expired { border-left-color: var(--danger); background: #fff5f5; animation: blink 1s infinite; }
+        @keyframes blink { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
+
+        .car-info { display: flex; justify-content: space-between; align-items: center; }
+        .car-name { font-size: 18px; font-weight: bold; }
+        .car-time { font-size: 14px; font-weight: bold; }
+        .price-display { font-size: 24px; font-weight: 900; color: var(--danger); margin: 10px 0; }
+        
+        .btn-pay { background: var(--success); color: white; border: none; padding: 10px 20px; border-radius: 10px; font-weight: bold; cursor: pointer; float: right; margin-top: -35px; }
+
+        #billModal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); z-index: 999; justify-content: center; align-items: center; }
+        .bill-box { background: white; width: 85%; max-width: 320px; padding: 25px; border-radius: 20px; text-align: center; }
+    </style>
+</head>
+<body>
+
+<div class="card">
+    <h3>⏱ THUÊ XE & HẸN GIỜ</h3>
+    <input type="text" id="carId" placeholder="Tên khách / Biển số xe">
+    
+    <div style="font-size: 12px; color: #666; margin-bottom: 5px; margin-left: 5px;">Hẹn giờ trả xe:</div>
+    <select id="duration">
+        <option value="0">Không hẹn giờ (Chơi tự do)</option>
+        <option value="30">30 phút (30.000đ)</option>
+        <option value="60">60 phút (50.000đ)</option>
+    </select>
+
+    <input type="number" id="preMin" placeholder="Số phút đã vào trước (nếu có)">
+    
+    <button class="btn-start" onclick="startRide()">BẮT ĐẦU</button>
+</div>
+
+<div id="liveCars"></div>
+
+<div id="billModal"><div class="bill-box" id="modalData"></div></div>
+
+<audio id="alarmSound" src="https://actions.google.com/sounds/v1/alarms/beep_short.ogg" preload="auto"></audio>
+
+<script>
+    const firebaseConfig = {
+        apiKey: "AIzaSyB6puPbtAdq_rSCytzd1Bjz3Q6Jn4FGR0E",
+        authDomain: "quanlynuoc-61a35.firebaseapp.com",
+        databaseURL: "https://quanlynuoc-61a35-default-rtdb.asia-southeast1.firebasedatabase.app",
+        projectId: "quanlynuoc-61a35",
+        storageBucket: "quanlynuoc-61a35.firebasestorage.app",
+        messagingSenderId: "1039644266200",
+        appId: "1:1039644266200:web:d74df5faa72bcf26e151ad"
+    };
+    firebase.initializeApp(firebaseConfig);
+    const db = firebase.database();
+
+    function calcPrice(min) {
+        if (min <= 0) return 0;
+        let p = (min <= 30) ? (min * 1000) : (30000 + (min - 30) * (20000 / 30));
+        return Math.round(p / 1000) * 1000;
+    }
+
+    function startRide() {
+        const name = document.getElementById('carId').value;
+        const dur = parseInt(document.getElementById('duration').value);
+        const pre = parseInt(document.getElementById('preMin').value || 0);
+        
+        if(!name) return alert("Nhập tên khách!");
+        
+        db.ref('rides/').push({
+            name: name,
+            startTime: Date.now() - (pre * 60000),
+            limitMin: dur // Lưu mốc hẹn giờ
+        });
+        
+        document.getElementById('carId').value = '';
+        document.getElementById('preMin').value = '';
+    }
+
+    db.ref('rides/').on('value', (snap) => {
+        const data = snap.val();
+        const list = document.getElementById('liveCars');
+        list.innerHTML = '';
+        let playAlarm = false;
+
+        for (let id in data) {
+            const elapsed = Math.floor((Date.now() - data[id].startTime) / 60000);
+            const currentPrice = calcPrice(elapsed);
+            const limit = data[id].limitMin || 0;
+            
+            // Kiểm tra xem đã hết giờ hẹn chưa
+            const isExpired = (limit > 0 && elapsed >= limit);
+            if (isExpired) playAlarm = true;
+
+            list.innerHTML += `
+                <div class="car-card ${isExpired ? 'expired' : ''}">
+                    <div class="car-info">
+                        <span class="car-name">${data[id].name} ${limit > 0 ? '(Hẹn '+limit+'p)' : ''}</span>
+                        <span class="car-time" style="color:${isExpired ? 'red' : 'blue'}">⏱ ${elapsed} phút</span>
+                    </div>
+                    <div class="price-display">${currentPrice.toLocaleString()}đ</div>
+                    <button class="btn-pay" onclick="finishRide('${id}')">BILL</button>
+                </div>`;
+        }
+
+        if (playAlarm) document.getElementById('alarmSound').play();
+    });
+
+    function finishRide(id) {
+        db.ref('rides/' + id).once('value', (s) => {
+            const d = s.val();
+            const elapsed = Math.floor((Date.now() - d.startTime) / 60000);
+            const finalPrice = calcPrice(elapsed);
+            
+            document.getElementById('modalData').innerHTML = `
+                <h2>THANH TOÁN</h2>
+                <p>Khách: <b>${d.name}</b></p>
+                <p>Thời gian: <b>${elapsed} phút</b></p>
+                <div style="font-size:35px; font-weight:bold; color:red; margin:15px 0;">${finalPrice.toLocaleString()}đ</div>
+                <button class="btn-start" style="background:var(--success)" onclick="confirmPay('${id}')">XÁC NHẬN THU TIỀN</button>
+                <button onclick="document.getElementById('billModal').style.display='none'" style="margin-top:15px; border:none; background:none; color:blue; font-weight:bold; cursor:pointer">QUAY LẠI</button>
+            `;
+            document.getElementById('billModal').style.display = 'flex';
+        });
+    }
+
+    function confirmPay(id) {
+        db.ref('rides/' + id).remove();
+        document.getElementById('billModal').style.display = 'none';
+    }
+
+    setInterval(() => { db.ref('rides/').once('value', () => {}); }, 15000); // Cập nhật mỗi 15 giây
+</script>
+</body>
+</html>
